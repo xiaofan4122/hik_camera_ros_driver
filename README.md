@@ -40,7 +40,7 @@
 cd ~/catkin_ws/src
 
 # 2. 克隆或放入本项目 (文件夹名必须为 hik_camera_ros_driver)
-# (假设你已经把代码放好了)
+git clone git@github.com:xiaofan4122/hik_camera_ros_driver.git
 
 # 3. 编译
 cd ~/catkin_ws
