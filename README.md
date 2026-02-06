@@ -1,4 +1,4 @@
-# Hikvision Camera ROS Driver
+# Hikvision Camera ROS Driver 海康威视相机 ROS 驱动
 
 这是一个轻量级海康威视（Hikvision）工业相机 ROS 驱动节点。
 
