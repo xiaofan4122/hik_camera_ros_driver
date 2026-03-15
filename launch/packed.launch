@@ -1,0 +1,6 @@
+<launch>
+  <node pkg="hik_camera_ros_driver" type="hik_camera_node" name="hik_camera_node" output="screen">
+    <param name="publish_mode" value="packed" />
+    <param name="packed_topic" value="/hik_camera/frame" />
+  </node>
+</launch>

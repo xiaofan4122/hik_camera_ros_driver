@@ -1,0 +1,4 @@
+sensor_msgs/Image image
+uint64 device_timestamp_ns
+float32 exposure_time_us
+float32 gain_db

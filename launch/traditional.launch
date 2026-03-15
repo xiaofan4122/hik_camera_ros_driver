@@ -1,0 +1,9 @@
+<launch>
+  <node pkg="hik_camera_ros_driver" type="hik_camera_node" name="hik_camera_node" output="screen">
+    <param name="publish_mode" value="split_topics" />
+    <param name="image_topic" value="/hik_camera/image_raw" />
+    <param name="exposure_topic" value="/hik_camera/exposure_time" />
+    <param name="gain_topic" value="/hik_camera/gain" />
+    <param name="device_timestamp_topic" value="/hik_camera/device_timestamp" />
+  </node>
+</launch>

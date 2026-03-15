@@ -8,6 +8,8 @@
 
 **极致轻量**，本驱动仅利用海康相机自带的 **User Set（用户集）** 功能，不会自行设置任何参**数防止覆盖**。
 
+**更严格的时间戳**，
+
 **工作流：**
 * 在 Windows/Linux 的 MVS 客户端中通过 GUI 调试好最佳图像效果并保存设置到用户集。
 * ROS 驱动启动时通过参数直接加载指定配置。
@@ -25,6 +27,7 @@
 * **智能错误诊断**：自动解析错误码，针对 "资源被占用"、"IP网段不匹配"、"防火墙拦截" 等常见问题给出具体的解决建议。
 * **实时状态监控**：每 2 秒在终端输出一次**真实 FPS**、**实时曝光时间**、**实时增益**以及**硬件时间戳**，方便监控相机运行状态（特别是自动曝光模式下）。
 * **详细配置打印**：启动时自动打印分辨率、理论最大帧率、以及当前的曝光/增益控制模式（自动/手动）。
+* **双发布模式**：支持传统分 topic 发布，或使用自定义消息将图像、设备时间戳、曝光、增益打包到同一条消息中。
 
 ## 🛠️ 依赖环境
 
@@ -50,6 +53,16 @@ catkin_make
 source devel/setup.bash
 ```
 
+如果当前机器不安装 MVS，只想生成消息头文件给其他 ROS 程序使用：
+
+```bash
+cd ~/catkin_ws
+catkin_make -DBUILD_CAMERA_NODE=OFF
+source devel/setup.bash
+```
+
+此模式下仅生成 `hik_camera_ros_driver/HikFrame` 相关消息代码，不编译 `hik_camera_node`，也不会查找 `/opt/MVS` 或 OpenCV。
+
 ## 运行
 
 以默认设置运行
@@ -57,6 +70,13 @@ source devel/setup.bash
 ```bash
 rosrun hik_camera_ros_driver hik_camera_node
 ```
+
+默认发布模式为 `split_topics`，会分别发布：
+
+- `/hik_camera/image_raw`
+- `/hik_camera/exposure_time`
+- `/hik_camera/gain`
+- `/hik_camera/device_timestamp`
 
 指定topic运行（默认为`/hik_camera/image`）
 
@@ -77,6 +97,36 @@ rosrun hik_camera_ros_driver hik_camera_node _user_set:=<ID>
 - `1`: 加载用户集 1 (UserSet1)。
 - `2`: 加载用户集 2 (UserSet2)。
 - `3`: 加载用户集 3 (UserSet3)。
+
+### 发布模式
+
+传统分 topic 模式：
+
+```bash
+roslaunch hik_camera_ros_driver traditional.launch
+```
+
+自定义消息打包模式：
+
+```bash
+roslaunch hik_camera_ros_driver packed.launch
+```
+
+也可以直接用参数切换：
+
+```bash
+rosrun hik_camera_ros_driver hik_camera_node _publish_mode:=packed
+```
+
+`split_topics` 模式下，图像时间戳仍写入 `sensor_msgs/Image.header.stamp`，同时单独发布设备原始时间戳、每帧曝光时间和每帧增益。  
+`packed` 模式下，节点发布自定义消息 `hik_camera_ros_driver/HikFrame`：
+
+```text
+sensor_msgs/Image image
+uint64 device_timestamp_ns
+float32 exposure_time_us
+float32 gain_db
+```
 
 
 ## 📊 终端输出示例

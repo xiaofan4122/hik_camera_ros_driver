@@ -1,20 +1,37 @@
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
-#include <sensor_msgs/image_encodings.h>
+#include <sensor_msgs/Image.h>
 #include <opencv2/opencv.hpp>
+#include <std_msgs/Float32.h>
+#include <std_msgs/UInt64.h>
+
 #include "MvCameraControl.h"
+#include "hik_camera_ros_driver/HikFrame.h"
+
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
+#include <utility>
 
 using namespace std;
 
 class HikCameraNode {
 private:
+    enum PublishMode {
+        SPLIT_TOPICS,
+        PACKED
+    };
+
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
     image_transport::ImageTransport it_;
     image_transport::Publisher image_pub_;
+    ros::Publisher exposure_pub_;
+    ros::Publisher gain_pub_;
+    ros::Publisher device_timestamp_pub_;
+    ros::Publisher packed_frame_pub_;
 
     void* handle_;
     unsigned char* pData_;
@@ -23,19 +40,43 @@ private:
     unsigned int nDataForRGBSize_;
     MV_CC_DEVICE_INFO_LIST stDeviceList_;
 
-    std::string topic_name_;
+    string image_topic_;
+    string exposure_topic_;
+    string gain_topic_;
+    string device_timestamp_topic_;
+    string packed_topic_;
+    string frame_id_;
+    PublishMode publish_mode_;
 
-    // --- 时间同步相关变量 ---
     bool use_ptp_;
     ros::Time boot_time_offset_;
     bool is_offset_calculated_;
+    bool has_warned_missing_chunk_metadata_;
 
 public:
-    HikCameraNode() : nh_(), pnh_("~"), it_(nh_), handle_(NULL), pData_(NULL), pDataForRGB_(NULL),
-                      use_ptp_(false), is_offset_calculated_(false) {
-        pnh_.param<std::string>("image_topic", topic_name_, "/hik_camera/image_raw");
+    HikCameraNode()
+        : nh_(),
+          pnh_("~"),
+          it_(nh_),
+          handle_(NULL),
+          pData_(NULL),
+          pDataForRGB_(NULL),
+          nDataSize_(0),
+          nDataForRGBSize_(0),
+          publish_mode_(SPLIT_TOPICS),
+          use_ptp_(false),
+          is_offset_calculated_(false),
+          has_warned_missing_chunk_metadata_(false) {
+        pnh_.param<string>("image_topic", image_topic_, "/hik_camera/image_raw");
+        pnh_.param<string>("exposure_topic", exposure_topic_, "/hik_camera/exposure_time");
+        pnh_.param<string>("gain_topic", gain_topic_, "/hik_camera/gain");
+        pnh_.param<string>("device_timestamp_topic", device_timestamp_topic_, "/hik_camera/device_timestamp");
+        pnh_.param<string>("packed_topic", packed_topic_, "/hik_camera/frame");
+        pnh_.param<string>("frame_id", frame_id_, "camera_optical_frame");
+        publish_mode_ = parsePublishMode();
+
         printUsageHint();
-        image_pub_ = it_.advertise(topic_name_, 1);
+        setupPublishers();
         initCamera();
     }
 
@@ -50,20 +91,59 @@ public:
         ROS_INFO("Hikvision Camera released.");
     }
 
+    PublishMode parsePublishMode() {
+        string publish_mode_str;
+        pnh_.param<string>("publish_mode", publish_mode_str, "split_topics");
+
+        if (publish_mode_str == "packed") {
+            return PACKED;
+        }
+
+        if (publish_mode_str != "split_topics") {
+            ROS_WARN("Unknown publish_mode [%s], fallback to [split_topics].", publish_mode_str.c_str());
+        }
+        return SPLIT_TOPICS;
+    }
+
+    void setupPublishers() {
+        if (publish_mode_ == PACKED) {
+            packed_frame_pub_ = nh_.advertise<hik_camera_ros_driver::HikFrame>(packed_topic_, 1);
+            return;
+        }
+
+        image_pub_ = it_.advertise(image_topic_, 1);
+        exposure_pub_ = nh_.advertise<std_msgs::Float32>(exposure_topic_, 1);
+        gain_pub_ = nh_.advertise<std_msgs::Float32>(gain_topic_, 1);
+        device_timestamp_pub_ = nh_.advertise<std_msgs::UInt64>(device_timestamp_topic_, 1);
+    }
+
     void printUsageHint() {
-        const char* GREEN  = "\033[32m";
+        const char* GREEN = "\033[32m";
         const char* YELLOW = "\033[33m";
-        const char* RESET  = "\033[0m";
-        const char* BOLD   = "\033[1m";
+        const char* RESET = "\033[0m";
+        const char* BOLD = "\033[1m";
 
         ROS_INFO("%s-----------------------------------------------------------------------%s", GREEN, RESET);
         ROS_INFO("%s  Hikvision Camera Node Started%s", GREEN, RESET);
-        ROS_INFO("%s  Usage: %srosrun hik_camera_ros_driver hik_camera_node _user_set:=<ID> _image_topic:=<NAME>%s", GREEN, YELLOW, RESET);
+        ROS_INFO("%s  Usage: %srosrun hik_camera_ros_driver hik_camera_node _user_set:=<ID> _publish_mode:=<MODE>%s", GREEN, YELLOW, RESET);
         ROS_INFO("%s  Params:%s", GREEN, RESET);
-        ROS_INFO("%s    _user_set:   -1 (Default), 0 (Factory), 1-3 (UserSet)%s", YELLOW, RESET);
-        ROS_INFO("%s    _image_topic: Output topic name (Default: /hik_camera/image_raw)%s", YELLOW, RESET);
+        ROS_INFO("%s    _user_set:             -1 (Default), 0 (Factory), 1-3 (UserSet)%s", YELLOW, RESET);
+        ROS_INFO("%s    _publish_mode:         split_topics | packed%s", YELLOW, RESET);
+        ROS_INFO("%s    _image_topic:          Image topic in split_topics mode%s", YELLOW, RESET);
+        ROS_INFO("%s    _exposure_topic:       Exposure topic in split_topics mode%s", YELLOW, RESET);
+        ROS_INFO("%s    _gain_topic:           Gain topic in split_topics mode%s", YELLOW, RESET);
+        ROS_INFO("%s    _device_timestamp_topic: Device timestamp topic in split_topics mode%s", YELLOW, RESET);
+        ROS_INFO("%s    _packed_topic:         Custom message topic in packed mode%s", YELLOW, RESET);
         ROS_INFO("%s-----------------------------------------------------------------------%s", GREEN, RESET);
-        ROS_INFO("%s  Current Topic: %s%s%s", GREEN, BOLD, topic_name_.c_str(), RESET);
+        if (publish_mode_ == PACKED) {
+            ROS_INFO("%s  Current Mode: %sPACKED%s -> %s%s%s", GREEN, BOLD, RESET, BOLD, packed_topic_.c_str(), RESET);
+        } else {
+            ROS_INFO("%s  Current Mode: %sSPLIT_TOPICS%s", GREEN, BOLD, RESET);
+            ROS_INFO("%s  Image Topic:  %s%s%s", GREEN, BOLD, image_topic_.c_str(), RESET);
+            ROS_INFO("%s  Exp Topic:    %s%s%s", GREEN, BOLD, exposure_topic_.c_str(), RESET);
+            ROS_INFO("%s  Gain Topic:   %s%s%s", GREEN, BOLD, gain_topic_.c_str(), RESET);
+            ROS_INFO("%s  TS Topic:     %s%s%s", GREEN, BOLD, device_timestamp_topic_.c_str(), RESET);
+        }
         ROS_INFO("%s-----------------------------------------------------------------------%s", GREEN, RESET);
     }
 
@@ -80,17 +160,20 @@ public:
         ROS_INFO("Found %d devices. Connecting to the first one...", stDeviceList_.nDeviceNum);
 
         nRet = MV_CC_CreateHandle(&handle_, stDeviceList_.pDeviceInfo[0]);
-        if (MV_OK != nRet) { ROS_ERROR("Create Handle failed!"); return; }
+        if (MV_OK != nRet) {
+            ROS_ERROR("Create Handle failed!");
+            return;
+        }
 
         nRet = MV_CC_OpenDevice(handle_);
         if (MV_OK != nRet) {
             string errDesc;
-            switch((unsigned int)nRet) {
+            switch ((unsigned int)nRet) {
                 case 0x80000004: errDesc = "MV_E_RESOURCE (Resource in use)"; break;
                 case 0x80000005: errDesc = "MV_E_ACCESS (Access denied / IP mismatch)"; break;
                 case 0x80000203: errDesc = "MV_E_ACCESSIBILITY (Device busy / Restarting / Unreachable)"; break;
                 case 0x80000206: errDesc = "MV_E_NETER (Network error / Firewall)"; break;
-                default:         errDesc = "Unknown Error"; break;
+                default: errDesc = "Unknown Error"; break;
             }
             ROS_ERROR("Open Device failed! Ret: [0x%x] -> %s", nRet, errDesc.c_str());
 
@@ -116,26 +199,37 @@ public:
         nRet = MV_CC_GetIntValue(handle_, "PayloadSize", &stParam);
         nDataSize_ = stParam.nCurValue;
 
-        pData_ = (unsigned char*)malloc(nDataSize_);
+        pData_ = static_cast<unsigned char*>(malloc(nDataSize_));
         nDataForRGBSize_ = nDataSize_ * 3 + 2048;
-        pDataForRGB_ = (unsigned char*)malloc(nDataForRGBSize_);
+        pDataForRGB_ = static_cast<unsigned char*>(malloc(nDataForRGBSize_));
 
         nRet = MV_CC_StartGrabbing(handle_);
         if (MV_OK != nRet) {
             ROS_ERROR("Start Grabbing failed! Ret: [%x]", nRet);
             return;
         }
-        ROS_INFO("Hikvision Camera Initialized. Publishing to [%s]", topic_name_.c_str());
+
+        if (publish_mode_ == PACKED) {
+            ROS_INFO("Hikvision Camera Initialized. Publishing packed frames to [%s]", packed_topic_.c_str());
+        } else {
+            ROS_INFO("Hikvision Camera Initialized. Publishing image to [%s]", image_topic_.c_str());
+        }
     }
 
     void loadUserSet(int set_id) {
         if (set_id < 0) return;
         int nRet = MV_CC_SetEnumValue(handle_, "UserSetSelector", set_id);
-        if (nRet != MV_OK) { ROS_WARN("Failed to select UserSet %d!", set_id); return; }
+        if (nRet != MV_OK) {
+            ROS_WARN("Failed to select UserSet %d!", set_id);
+            return;
+        }
 
         nRet = MV_CC_SetCommandValue(handle_, "UserSetLoad");
-        if (nRet != MV_OK) ROS_WARN("Failed to load UserSet %d!", set_id);
-        else ROS_INFO("Config: Successfully loaded UserSet [%d].", set_id);
+        if (nRet != MV_OK) {
+            ROS_WARN("Failed to load UserSet %d!", set_id);
+        } else {
+            ROS_INFO("Config: Successfully loaded UserSet [%d].", set_id);
+        }
     }
 
     void printCameraConfig() {
@@ -192,7 +286,7 @@ public:
         int ret_status = MV_CC_GetEnumValue(handle_, "GevIEEE1588Status", &ptp_status_enum);
 
         string status_str = "Unknown";
-        switch(ptp_status_enum.nCurValue) {
+        switch (ptp_status_enum.nCurValue) {
             case 0: status_str = "Initializing"; break;
             case 2: status_str = "Disabled"; break;
             case 3: status_str = "Listening"; break;
@@ -203,14 +297,91 @@ public:
 
         if (ret_enable == MV_OK && ret_status == MV_OK) {
             if (ptp_enable && ptp_status_enum.nCurValue == 8) {
-                return {true, status_str};
+                return make_pair(true, status_str);
             }
         }
-        return {false, status_str};
+        return make_pair(false, status_str);
+    }
+
+    ros::Time computeImageTimestamp(uint64_t dev_time_ns) {
+        const uint64_t ABSOLUTE_TIME_THRESHOLD = 1600000000000000000ULL;
+
+        pair<bool, string> ptp_status = checkPtpLockedStatus();
+        bool should_hard_sync = ptp_status.first;
+        bool is_timestamp_absolute = (dev_time_ns > ABSOLUTE_TIME_THRESHOLD);
+
+        if (is_timestamp_absolute) {
+            should_hard_sync = true;
+        }
+
+        if (should_hard_sync != use_ptp_) {
+            if (should_hard_sync) {
+                if (is_timestamp_absolute) {
+                    ROS_WARN("\033[32m[SYNC SWITCH] Timestamp looks like Unix Time! Enforcing Hard Sync.\033[0m");
+                } else {
+                    ROS_WARN("\033[32m[SYNC SWITCH] PTP Locked (State: %s)! Switching to Hard Sync.\033[0m", ptp_status.second.c_str());
+                }
+            } else {
+                ROS_WARN("\033[33m[SYNC SWITCH] PTP Lost. Switching to Soft Sync.\033[0m");
+                is_offset_calculated_ = false;
+            }
+            use_ptp_ = should_hard_sync;
+        }
+
+        ros::Time image_timestamp;
+        if (use_ptp_) {
+            image_timestamp.fromNSec(dev_time_ns);
+        } else {
+            if (!is_offset_calculated_) {
+                boot_time_offset_ = ros::Time::now() - ros::Duration(dev_time_ns / 1e9);
+                is_offset_calculated_ = true;
+            }
+            image_timestamp = boot_time_offset_ + ros::Duration(dev_time_ns / 1e9);
+        }
+        return image_timestamp;
+    }
+
+    void warnIfChunkMetadataMissing(float exposure_time_us, float gain_db) {
+        if (has_warned_missing_chunk_metadata_) {
+            return;
+        }
+
+        if (exposure_time_us <= 0.0f && gain_db <= 0.0f) {
+            ROS_WARN("\033[33m[CHUNK DATA] Failed to read per-frame exposure/gain metadata. Enable Data Chunk in MVS to output these fields with each frame.\033[0m");
+            has_warned_missing_chunk_metadata_ = true;
+        }
+    }
+
+    void publishSplitTopics(const sensor_msgs::ImagePtr& image_msg, uint64_t device_timestamp_ns,
+                            float exposure_time_us, float gain_db) {
+        std_msgs::Float32 exposure_msg;
+        exposure_msg.data = exposure_time_us;
+
+        std_msgs::Float32 gain_msg;
+        gain_msg.data = gain_db;
+
+        std_msgs::UInt64 device_timestamp_msg;
+        device_timestamp_msg.data = device_timestamp_ns;
+
+        image_pub_.publish(image_msg);
+        exposure_pub_.publish(exposure_msg);
+        gain_pub_.publish(gain_msg);
+        device_timestamp_pub_.publish(device_timestamp_msg);
+    }
+
+    void publishPackedFrame(const sensor_msgs::ImagePtr& image_msg, uint64_t device_timestamp_ns,
+                            float exposure_time_us, float gain_db) {
+        hik_camera_ros_driver::HikFrame frame_msg;
+        frame_msg.image = *image_msg;
+        frame_msg.device_timestamp_ns = device_timestamp_ns;
+        frame_msg.exposure_time_us = exposure_time_us;
+        frame_msg.gain_db = gain_db;
+        packed_frame_pub_.publish(frame_msg);
     }
 
     void run() {
         if (!handle_) return;
+
         MV_FRAME_OUT_INFO_EX stImageInfo = {0};
         MV_CC_PIXEL_CONVERT_PARAM stConvertParam = {0};
 
@@ -218,70 +389,16 @@ public:
         int frame_count = 0;
         uint64_t last_timestamp = 0;
 
-        // 设定一个阈值，比如 2020年 (单位: 纳秒)
-        // 1577836800 * 1e9
-        const uint64_t ABSOLUTE_TIME_THRESHOLD = 1600000000000000000ULL;
-
         while (ros::ok()) {
             int nRet = MV_CC_GetOneFrameTimeout(handle_, pData_, nDataSize_, &stImageInfo, 1000);
 
             if (nRet == MV_OK) {
                 frame_count++;
 
-                uint64_t dev_time_ns = ((uint64_t)stImageInfo.nDevTimeStampHigh << 32) | stImageInfo.nDevTimeStampLow;
+                uint64_t dev_time_ns = (static_cast<uint64_t>(stImageInfo.nDevTimeStampHigh) << 32) |
+                                       stImageInfo.nDevTimeStampLow;
                 last_timestamp = dev_time_ns;
-
-                // ==========================================================
-                // 1. PTP 状态检测
-                // ==========================================================
-                pair<bool, string> ptp_status = checkPtpLockedStatus();
-                bool should_hard_sync = ptp_status.first;
-
-                // ==========================================================
-                // 2. 启发式检测 (Heuristic Check) - 防止状态滞后导致的翻倍
-                // ==========================================================
-                // 如果传入的时间戳已经是 Unix 绝对时间，无论状态如何，都强制硬同步
-                bool is_timestamp_absolute = (dev_time_ns > ABSOLUTE_TIME_THRESHOLD);
-
-                if (is_timestamp_absolute) {
-                    should_hard_sync = true; // 强制覆盖
-                }
-
-                // ==========================================================
-                // 3. 状态切换与 Offset 重置
-                // ==========================================================
-                if (should_hard_sync != use_ptp_) {
-                    if (should_hard_sync) {
-                         if (is_timestamp_absolute) {
-                             // 因数据本身触发的切换
-                             ROS_WARN("\033[32m[SYNC SWITCH] Timestamp looks like Unix Time! Enforcing Hard Sync.\033[0m");
-                         } else {
-                             // 因 PTP 状态触发的切换
-                             ROS_WARN("\033[32m[SYNC SWITCH] PTP Locked (State: %s)! Switching to Hard Sync.\033[0m", ptp_status.second.c_str());
-                         }
-                    } else {
-                         ROS_WARN("\033[33m[SYNC SWITCH] PTP Lost. Switching to Soft Sync.\033[0m");
-                         is_offset_calculated_ = false;
-                    }
-                    use_ptp_ = should_hard_sync;
-                }
-
-                // ==========================================================
-                // 4. 计算最终时间戳
-                // ==========================================================
-                ros::Time image_timestamp;
-
-                if (use_ptp_) {
-                    // 硬同步
-                    image_timestamp.fromNSec(dev_time_ns);
-                } else {
-                    // 软同步
-                    if (!is_offset_calculated_) {
-                        boot_time_offset_ = ros::Time::now() - ros::Duration(dev_time_ns / 1e9);
-                        is_offset_calculated_ = true;
-                    }
-                    image_timestamp = boot_time_offset_ + ros::Duration(dev_time_ns / 1e9);
-                }
+                ros::Time image_timestamp = computeImageTimestamp(dev_time_ns);
 
                 stConvertParam.nWidth = stImageInfo.nWidth;
                 stConvertParam.nHeight = stImageInfo.nHeight;
@@ -293,18 +410,23 @@ public:
                 stConvertParam.nDstBufferSize = nDataForRGBSize_;
 
                 int nConvertRet = MV_CC_ConvertPixelType(handle_, &stConvertParam);
-                if (MV_OK == nConvertRet) {
+                if (nConvertRet == MV_OK) {
                     cv::Mat cv_image(stImageInfo.nHeight, stImageInfo.nWidth, CV_8UC3, pDataForRGB_);
                     std_msgs::Header header;
                     header.stamp = image_timestamp;
-                    header.frame_id = "camera_optical_frame";
+                    header.frame_id = frame_id_;
 
-                    sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "rgb8", cv_image).toImageMsg();
-                    image_pub_.publish(msg);
+                    sensor_msgs::ImagePtr image_msg = cv_bridge::CvImage(header, "rgb8", cv_image).toImageMsg();
+                    warnIfChunkMetadataMissing(stImageInfo.fExposureTime, stImageInfo.fGain);
+
+                    if (publish_mode_ == PACKED) {
+                        publishPackedFrame(image_msg, dev_time_ns, stImageInfo.fExposureTime, stImageInfo.fGain);
+                    } else {
+                        publishSplitTopics(image_msg, dev_time_ns, stImageInfo.fExposureTime, stImageInfo.fGain);
+                    }
                 }
             }
 
-            // 监控日志
             ros::Time now = ros::Time::now();
             double elapsed = (now - last_log_time).toSec();
             if (elapsed >= 2.0) {
@@ -314,12 +436,12 @@ public:
                 float current_gain = 0.0f;
 
                 if (MV_CC_GetFloatValue(handle_, "ExposureTime", &stExp) == MV_OK) current_exp = stExp.fCurValue;
-                if (MV_CC_GetFloatValue(handle_, "Gain", &stGain) == MV_OK)        current_gain = stGain.fCurValue;
+                if (MV_CC_GetFloatValue(handle_, "Gain", &stGain) == MV_OK) current_gain = stGain.fCurValue;
 
                 string sync_mode = use_ptp_ ? "Hard(PTP)" : "Soft";
 
                 ROS_INFO("[MONITOR] FPS: %.3f | Exp: %.3f us | Gain: %.3f dB | TS: %llu | Sync: %s",
-                         actual_fps, current_exp, current_gain, (unsigned long long)last_timestamp, sync_mode.c_str());
+                         actual_fps, current_exp, current_gain, static_cast<unsigned long long>(last_timestamp), sync_mode.c_str());
 
                 frame_count = 0;
                 last_log_time = now;
