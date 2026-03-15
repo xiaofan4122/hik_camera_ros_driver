@@ -78,7 +78,7 @@ rosrun hik_camera_ros_driver hik_camera_node
 - `/hik_camera/gain`
 - `/hik_camera/device_timestamp`
 
-指定topic运行（默认为`/hik_camera/image`）
+指定图像 topic 运行：
 
 ```bash
 rosrun hik_camera_ros_driver hik_camera_node _image_topic:=/camera_front/image
@@ -127,6 +127,77 @@ uint64 device_timestamp_ns
 float32 exposure_time_us
 float32 gain_db
 ```
+
+### Topic Name 配置方法
+
+本节点所有 topic 名称都通过**节点私有参数**配置，也就是代码中的 `~image_topic`、`~exposure_topic`、`~gain_topic`、`~device_timestamp_topic`、`~packed_topic`。
+
+如果使用 `rosrun`，私有参数写法如下：
+
+```bash
+rosrun hik_camera_ros_driver hik_camera_node _参数名:=topic名
+```
+
+可配置的 topic 参数如下：
+
+| 参数名 | 生效模式 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `image_topic` | `split_topics` | `/hik_camera/image_raw` | 图像 topic，消息类型为 `sensor_msgs/Image` |
+| `exposure_topic` | `split_topics` | `/hik_camera/exposure_time` | 曝光时间 topic，消息类型为 `std_msgs/Float32` |
+| `gain_topic` | `split_topics` | `/hik_camera/gain` | 增益 topic，消息类型为 `std_msgs/Float32` |
+| `device_timestamp_topic` | `split_topics` | `/hik_camera/device_timestamp` | 设备时间戳 topic，消息类型为 `std_msgs/UInt64` |
+| `packed_topic` | `packed` | `/hik_camera/frame` | 打包消息 topic，消息类型为 `hik_camera_ros_driver/HikFrame` |
+
+`split_topics` 模式下同时修改全部 topic：
+
+```bash
+rosrun hik_camera_ros_driver hik_camera_node \
+  _publish_mode:=split_topics \
+  _image_topic:=/camera/front/image_raw \
+  _exposure_topic:=/camera/front/exposure_time \
+  _gain_topic:=/camera/front/gain \
+  _device_timestamp_topic:=/camera/front/device_timestamp
+```
+
+`packed` 模式下修改打包 topic：
+
+```bash
+rosrun hik_camera_ros_driver hik_camera_node \
+  _publish_mode:=packed \
+  _packed_topic:=/camera/front/frame
+```
+
+如果使用 `roslaunch`，在 `<node>` 内通过 `<param>` 配置即可。
+
+`split_topics` 示例：
+
+```xml
+<launch>
+  <node pkg="hik_camera_ros_driver" type="hik_camera_node" name="hik_camera_node" output="screen">
+    <param name="publish_mode" value="split_topics" />
+    <param name="image_topic" value="/camera/front/image_raw" />
+    <param name="exposure_topic" value="/camera/front/exposure_time" />
+    <param name="gain_topic" value="/camera/front/gain" />
+    <param name="device_timestamp_topic" value="/camera/front/device_timestamp" />
+  </node>
+</launch>
+```
+
+`packed` 示例：
+
+```xml
+<launch>
+  <node pkg="hik_camera_ros_driver" type="hik_camera_node" name="hik_camera_node" output="screen">
+    <param name="publish_mode" value="packed" />
+    <param name="packed_topic" value="/camera/front/frame" />
+  </node>
+</launch>
+```
+
+仓库内也提供了可直接参考的 launch 文件：
+
+- `launch/traditional.launch`
+- `launch/packed.launch`
 
 
 ## 📊 终端输出示例
